@@ -1,55 +1,497 @@
 #!/usr/bin/env bash
 
-# Simple test version of deploy-setup
+# Deploy-Setup - Comprehensive deployment setup tool for After Dark Systems
+# 
+# This script automates the setup of infrastructure and deployment configurations
+# for web applications across various cloud providers.
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get the directory containing this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Source utility functions
+source "$PROJECT_ROOT/lib/utils.sh"
+
+# Default configuration
+CLOUD_PROVIDER="aws"
+PROJECT_TYPE=""
+PROJECT_NAME=""
+project_dir=""
+USE_EC2=false
+USE_ECS=false
+USE_RDS=false
+NEED_S3=false
+NEED_ELB=false
+ECS_NUM=1
+PROJECT_LANG=""
+RDS_TYPE="mysql"
+INTERACTIVE=true
+FORCE_PUSH=false
 
 show_help() {
-    cat << 'HELP'
-    deploy-setup - A comprehensive deployment setup tool for After Dark Systems
-    
-    USAGE:
-        deploy-setup [OPTIONS]
-    
-    OPTIONS:
-        --cloud=PROVIDER      Cloud provider (default: aws)
-        --project=PATH        Path to project directory
-        --help               Show this help message
-        --version            Show version
-HELP
+    cat << 'EOL'
+deploy-setup - Comprehensive deployment setup tool for After Dark Systems
+
+USAGE:
+    deploy-setup [OPTIONS]
+
+OPTIONS:
+    --cloud=PROVIDER         Cloud provider (aws, gcp, azure) [default: aws]
+    --project=PATH          Path to project directory [required]
+    --type=TYPE             Project type (node, python, php, static)
+    --name=NAME             Project name (auto-detected if not provided)
+    --ec2                   Use EC2 instances
+    --ecs[=NUM]             Use ECS containers (default: 1 instance)
+    --rds[=TYPE]            Use RDS database (mysql, postgres)
+    --s3                    Include S3 bucket
+    --elb                   Include load balancer
+    --non-interactive       Run without prompts
+    --force-push            Push to git remote after setup
+    --tag-secrets           Tag secrets in project files
+    --check-permissions     Check file permissions
+    --help, -h              Show this help message
+    --version, -v           Show version
+
+EXAMPLES:
+    # Basic setup for Node.js project
+    deploy-setup --project=./my-app --type=node --ec2
+
+    # Full setup with database and load balancer
+    deploy-setup --project=./my-app --type=python --ec2 --rds=postgres --elb --s3
+
+    # ECS deployment with 3 containers
+    deploy-setup --project=./my-app --type=node --ecs=3 --rds
+
+    # Tag secrets and check permissions
+    deploy-setup --project=./my-app --tag-secrets --check-permissions
+
+SUPPORTED PROJECT TYPES:
+    node        - Node.js applications
+    python      - Python applications (Flask/Django)
+    php         - PHP applications
+    static      - Static websites
+
+EOL
 }
 
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+show_version() {
+    echo "deploy-setup v1.0.0"
+    echo "A comprehensive deployment setup tool for After Dark Systems"
 }
 
-error_exit() {
-    log "ERROR: $1" >&2
+detect_project_type() {
+    local project_path="$1"
+    
+    if [[ -f "$project_path/package.json" ]]; then
+        echo "node"
+    elif [[ -f "$project_path/requirements.txt" ]] || [[ -f "$project_path/setup.py" ]] || [[ -f "$project_path/pyproject.toml" ]]; then
+        echo "python"
+    elif [[ -f "$project_path/composer.json" ]] || [[ -f "$project_path/index.php" ]]; then
+        echo "php"
+    elif [[ -f "$project_path/index.html" ]]; then
+        echo "static"
+    else
+        echo "unknown"
+    fi
+}
+
+interactive_setup() {
+    log "Starting interactive deployment setup..."
+    
+    # Get project directory if not provided
+    if [[ -z "$project_dir" ]]; then
+        read -p "Enter project directory path: " project_dir
+        project_dir=$(realpath "$project_dir")
+    fi
+    
+    if [[ ! -d "$project_dir" ]]; then
+        error_exit "Project directory does not exist: $project_dir"
+    fi
+    
+    # Auto-detect project type if not provided
+    if [[ -z "$PROJECT_TYPE" ]]; then
+        PROJECT_TYPE=$(detect_project_type "$project_dir")
+        if [[ "$PROJECT_TYPE" == "unknown" ]]; then
+            echo "Available project types: node, python, php, static"
+            read -p "Enter project type: " PROJECT_TYPE
+        else
+            log "Detected project type: $PROJECT_TYPE"
+            if ! confirm "Use detected project type '$PROJECT_TYPE'?"; then
+                read -p "Enter project type: " PROJECT_TYPE
+            fi
+        fi
+    fi
+    
+    # Get project name if not provided
+    if [[ -z "$PROJECT_NAME" ]]; then
+        PROJECT_NAME=$(basename "$project_dir")
+        if ! confirm "Use project name '$PROJECT_NAME'?"; then
+            read -p "Enter project name: " PROJECT_NAME
+        fi
+    fi
+    
+    # Infrastructure options
+    echo ""
+    log "Infrastructure Configuration:"
+    
+    if confirm "Use EC2 instances?"; then
+        USE_EC2=true
+    fi
+    
+    if confirm "Use ECS containers?"; then
+        USE_ECS=true
+        read -p "Number of ECS instances [1]: " ECS_NUM
+        ECS_NUM=${ECS_NUM:-1}
+    fi
+    
+    if confirm "Use RDS database?"; then
+        USE_RDS=true
+        echo "Available database types: mysql, postgres"
+        read -p "Database type [mysql]: " RDS_TYPE
+        RDS_TYPE=${RDS_TYPE:-mysql}
+    fi
+    
+    if confirm "Include S3 bucket?"; then
+        NEED_S3=true
+    fi
+    
+    if confirm "Include load balancer?"; then
+        NEED_ELB=true
+    fi
+    
+    # Set project language for configurations
+    PROJECT_LANG="$PROJECT_TYPE"
+}
+
+setup_project_structure() {
+    log "Setting up project structure in: $project_dir"
+    
+    # Create necessary directories
+    ensure_directory_exists "$project_dir/terraform"
+    ensure_directory_exists "$project_dir/ansible"
+    ensure_directory_exists "$project_dir/docs"
+    ensure_directory_exists "$project_dir/scripts"
+    
+    # Create project status file
+    local status_file="$project_dir/.project_status"
+    if [[ ! -f "$status_file" ]]; then
+        cat > "$status_file" << EOL
+{
+    "project_name": "$PROJECT_NAME",
+    "project_type": "$PROJECT_TYPE",
+    "cloud_provider": "$CLOUD_PROVIDER",
+    "created_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+    "infrastructure": {
+        "ec2": $USE_EC2,
+        "ecs": $USE_ECS,
+        "rds": $USE_RDS,
+        "s3": $NEED_S3,
+        "elb": $NEED_ELB
+    },
+    "last_updated": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+}
+EOL
+        log "Created project status file: $status_file"
+    fi
+}
+
+generate_infrastructure() {
+    log "Generating infrastructure configurations..."
+    
+    # Set required variables for the generator functions
+    export project_name="$PROJECT_NAME"
+    export project_dir="$project_dir"
+    
+    # Generate Terraform configurations
+    generate_terraform_config
+    
+    # Generate Ansible playbooks
+    generate_ansible_playbooks
+    
+    log "Infrastructure configurations generated successfully!"
+}
+
+create_deployment_scripts() {
+    local scripts_dir="$project_dir/scripts"
+    
+    # Terraform deployment script
+    cat > "$scripts_dir/deploy-terraform.sh" << 'EOL'
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../terraform"
+
+echo "Initializing Terraform..."
+terraform init
+
+echo "Planning Terraform deployment..."
+terraform plan
+
+read -p "Apply Terraform configuration? (y/n): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "Applying Terraform configuration..."
+    terraform apply -auto-approve
+    
+    echo "Deployment complete!"
+    terraform output
+else
+    echo "Deployment cancelled."
+fi
+EOL
+    
+    # Ansible deployment script
+    cat > "$scripts_dir/deploy-ansible.sh" << 'EOL'
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../ansible"
+
+if [[ ! -f "inventory" ]]; then
+    echo "Error: Ansible inventory file not found!"
+    echo "Please update ansible/inventory with your server details."
     exit 1
+fi
+
+echo "Running Ansible playbook..."
+ansible-playbook -i inventory site.yml
+
+echo "Application deployment complete!"
+EOL
+    
+    # Make scripts executable
+    chmod +x "$scripts_dir/deploy-terraform.sh"
+    chmod +x "$scripts_dir/deploy-ansible.sh"
+    
+    log "Created deployment scripts in $scripts_dir/"
 }
 
-# Parse command line arguments
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        --version|-v)
-            echo "deploy-setup v1.0.0"
-            exit 0
-            ;;
-        --project=*)
-            PROJECT_PATH="${1#*=}"
-            log "Project path set to: $PROJECT_PATH"
-            ;;
-        *)
-            error_exit "Unknown option: $1"
-            ;;
-    esac
-    shift
-done
+create_documentation() {
+    local docs_dir="$project_dir/docs"
+    
+    cat > "$docs_dir/README.md" << EOL
+# $PROJECT_NAME Deployment
 
-log "Test script executed successfully"
+This project has been set up with automated deployment configurations using deploy-setup.
+
+## Project Details
+- **Type**: $PROJECT_TYPE
+- **Cloud Provider**: $CLOUD_PROVIDER
+- **Infrastructure**: $(if $USE_EC2; then echo "EC2"; fi)$(if $USE_ECS; then echo " ECS"; fi)$(if $USE_RDS; then echo " RDS"; fi)$(if $NEED_S3; then echo " S3"; fi)$(if $NEED_ELB; then echo " ELB"; fi)
+
+## Directory Structure
+\`\`\`
+$PROJECT_NAME/
+├── terraform/          # Infrastructure as Code
+├── ansible/            # Configuration Management
+├── scripts/            # Deployment Scripts
+└── docs/               # Documentation
+\`\`\`
+
+## Deployment Steps
+
+### 1. Infrastructure Setup (Terraform)
+\`\`\`bash
+cd terraform
+terraform init
+terraform plan
+terraform apply
+\`\`\`
+
+Or use the deployment script:
+\`\`\`bash
+./scripts/deploy-terraform.sh
+\`\`\`
+
+### 2. Application Deployment (Ansible)
+First, update the inventory file with your server details:
+\`\`\`bash
+vim ansible/inventory
+\`\`\`
+
+Then run the playbook:
+\`\`\`bash
+cd ansible
+ansible-playbook -i inventory site.yml
+\`\`\`
+
+Or use the deployment script:
+\`\`\`bash
+./scripts/deploy-ansible.sh
+\`\`\`
+
+## Configuration Files
+- \`terraform/\` - Contains all Terraform infrastructure definitions
+- \`ansible/\` - Contains Ansible playbooks and roles for application deployment
+- \`.project_status\` - Project metadata and configuration
+
+## Next Steps
+1. Review and customize the generated configurations
+2. Set up your cloud provider credentials
+3. Update Ansible inventory with your server information
+4. Run the deployment scripts
+
+For more information, see the individual README files in each directory.
+EOL
+    
+    log "Created documentation in $docs_dir/"
+}
+
+main() {
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version|-v)
+                show_version
+                exit 0
+                ;;
+            --cloud=*)
+                CLOUD_PROVIDER="${1#*=}"
+                ;;
+            --project=*)
+                project_dir="${1#*=}"
+                project_dir=$(realpath "$project_dir" 2>/dev/null || echo "$project_dir")
+                ;;
+            --type=*)
+                PROJECT_TYPE="${1#*=}"
+                ;;
+            --name=*)
+                PROJECT_NAME="${1#*=}"
+                ;;
+            --ec2)
+                USE_EC2=true
+                ;;
+            --ecs=*)
+                USE_ECS=true
+                ECS_NUM="${1#*=}"
+                ;;
+            --ecs)
+                USE_ECS=true
+                ECS_NUM=1
+                ;;
+            --rds=*)
+                USE_RDS=true
+                RDS_TYPE="${1#*=}"
+                ;;
+            --rds)
+                USE_RDS=true
+                RDS_TYPE="mysql"
+                ;;
+            --s3)
+                NEED_S3=true
+                ;;
+            --elb)
+                NEED_ELB=true
+                ;;
+            --non-interactive)
+                INTERACTIVE=false
+                ;;
+            --force-push)
+                FORCE_PUSH=true
+                ;;
+            --tag-secrets)
+                if [[ -n "$project_dir" ]] && [[ -d "$project_dir" ]]; then
+                    cd "$project_dir"
+                    tag_secrets "." "Tagged secrets in project"
+                    log "Secrets tagged successfully"
+                    exit 0
+                else
+                    error_exit "Project directory required for --tag-secrets"
+                fi
+                ;;
+            --check-permissions)
+                if [[ -n "$project_dir" ]] && [[ -d "$project_dir" ]]; then
+                    check_permissions "$project_dir"
+                    exit $?
+                else
+                    error_exit "Project directory required for --check-permissions"
+                fi
+                ;;
+            *)
+                error_exit "Unknown option: $1"
+                ;;
+        esac
+        shift
+    done
+    
+    # Validate required parameters
+    if [[ -z "$project_dir" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            interactive_setup
+        else
+            error_exit "Project directory is required. Use --project=PATH or run interactively."
+        fi
+    else
+        if [[ ! -d "$project_dir" ]]; then
+            error_exit "Project directory does not exist: $project_dir"
+        fi
+        
+        # Auto-detect project type if not provided
+        if [[ -z "$PROJECT_TYPE" ]]; then
+            PROJECT_TYPE=$(detect_project_type "$project_dir")
+            if [[ "$PROJECT_TYPE" == "unknown" ]] && [[ "$INTERACTIVE" == "true" ]]; then
+                interactive_setup
+            elif [[ "$PROJECT_TYPE" == "unknown" ]]; then
+                error_exit "Could not detect project type. Use --type=TYPE"
+            fi
+        fi
+        
+        # Set project name if not provided
+        if [[ -z "$PROJECT_NAME" ]]; then
+            PROJECT_NAME=$(basename "$project_dir")
+        fi
+        
+        # Set project language
+        PROJECT_LANG="$PROJECT_TYPE"
+        
+        # Run interactive setup for infrastructure options if not provided
+        if [[ "$INTERACTIVE" == "true" ]] && ! $USE_EC2 && ! $USE_ECS; then
+            interactive_setup
+        fi
+    fi
+    
+    log "Deployment setup starting for project: $PROJECT_NAME"
+    log "Project type: $PROJECT_TYPE"
+    log "Cloud provider: $CLOUD_PROVIDER"
+    log "Project directory: $project_dir"
+    
+    # Change to project directory
+    cd "$project_dir"
+    
+    # Setup project structure
+    setup_project_structure
+    
+    # Generate infrastructure configurations
+    generate_infrastructure
+    
+    # Create deployment scripts
+    create_deployment_scripts
+    
+    # Create documentation
+    create_documentation
+    
+    # Commit to git if requested
+    if [[ "$FORCE_PUSH" == "true" ]]; then
+        commit_to_local_git "Added deployment setup configurations" true
+    fi
+    
+    log "Deployment setup completed successfully!"
+    log ""
+    log "Next steps:"
+    log "1. Review generated configurations in terraform/ and ansible/"
+    log "2. Update ansible/inventory with your server details"
+    log "3. Configure your cloud provider credentials"
+    log "4. Run ./scripts/deploy-terraform.sh to create infrastructure"
+    log "5. Run ./scripts/deploy-ansible.sh to deploy your application"
+    log ""
+    log "For detailed instructions, see docs/README.md"
+}
+
+# Run main function
+main "$@"
