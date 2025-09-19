@@ -7,7 +7,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 show_help() {
-    cat <<- 'EOL'
+    cat << 'HELP'
     deploy-setup - A comprehensive deployment setup tool for After Dark Systems
     
     USAGE:
@@ -18,7 +18,7 @@ show_help() {
         --project=PATH        Path to project directory
         --help               Show this help message
         --version            Show version
-    EOL
+HELP
 }
 
 log() {
