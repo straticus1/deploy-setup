@@ -1,19 +1,55 @@
 #!/usr/bin/env bash
 
-echo "deploy-setup v1.0.0 - Test Version"
-echo "This is a working test script"
+# Simple test version of deploy-setup
 
-if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    echo "Usage: $0 [--help|--version]"
-    echo "Options:"
-    echo "  --help     Show this help"
-    echo "  --version  Show version"
-    exit 0
-fi
+set -euo pipefail
 
-if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
-    echo "deploy-setup v1.0.0"
-    exit 0
-fi
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Script executed successfully!"
+show_help() {
+    cat <<- 'EOL'
+    deploy-setup - A comprehensive deployment setup tool for After Dark Systems
+    
+    USAGE:
+        deploy-setup [OPTIONS]
+    
+    OPTIONS:
+        --cloud=PROVIDER      Cloud provider (default: aws)
+        --project=PATH        Path to project directory
+        --help               Show this help message
+        --version            Show version
+    EOL
+}
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+}
+
+error_exit() {
+    log "ERROR: $1" >&2
+    exit 1
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --version|-v)
+            echo "deploy-setup v1.0.0"
+            exit 0
+            ;;
+        --project=*)
+            PROJECT_PATH="${1#*=}"
+            log "Project path set to: $PROJECT_PATH"
+            ;;
+        *)
+            error_exit "Unknown option: $1"
+            ;;
+    esac
+    shift
+done
+
+log "Test script executed successfully"
