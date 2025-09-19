@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+echo "deploy-setup v1.0.0 - Test Version"
+echo "This is a working test script"
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: $0 [--help|--version]"
+    echo "Options:"
+    echo "  --help     Show this help"
+    echo "  --version  Show version"
+    exit 0
+fi
+
+if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
+    echo "deploy-setup v1.0.0"
+    exit 0
+fi
+
+echo "Script executed successfully!"
